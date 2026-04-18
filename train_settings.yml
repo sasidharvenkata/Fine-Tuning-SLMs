@@ -52,7 +52,7 @@ model:
   # Why sdpa by default: it is the safer default across environments and avoids common compatibility issues when
   # FlashAttention-2 is not installed or when a given model/library combination does not accept the argument cleanly.
   # Switch to flash_attention_2 only after verifying your environment supports it end-to-end.
-  attn_implementation: sdpa
+  attn_implementation: flash_attention_2
 
   # Whether to use the Unsloth-first orchestration policy.
   # Values: true | false.
