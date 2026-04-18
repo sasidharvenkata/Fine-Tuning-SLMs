@@ -277,31 +277,34 @@ def load_and_prepare_dataset(cfg: Dict[str, Any]):
 
 
 def choose_backend(cfg: Dict[str, Any]) -> RuntimeChoice:
-    """Resolve whether Unsloth or standard Hugging Face should be used.
+    """Resolve the training backend with an Unsloth-first orchestration policy.
 
-    Logic
-    -----
-    - If config explicitly disables Unsloth, use Hugging Face.
-    - If Unsloth cannot be imported, use Hugging Face.
-    - Otherwise prefer Unsloth, especially for Mistral where documented support exists.
+    Policy
+    ------
+    1. Always attempt Unsloth first unless the user explicitly disables it.
+    2. Use Hugging Face only when Unsloth cannot be imported, the chosen model is
+       not supported by the requested Unsloth loading path, or Unsloth runtime
+       initialization/training fails.
+
+    This matches an operational strategy where Unsloth is the primary engine on
+    RunPod GPUs and Transformers acts only as a safety fallback.
     """
-    use_unsloth = cfg["model"].get("use_unsloth", "auto")
+    use_unsloth = cfg["model"].get("use_unsloth", True)
     if use_unsloth is False or str(use_unsloth).lower() == "false":
-        return RuntimeChoice("huggingface", "Config disabled Unsloth.")
+        return RuntimeChoice("huggingface", "Config explicitly disabled Unsloth.")
 
     try:
         import unsloth  # noqa: F401
     except Exception as exc:
-        return RuntimeChoice("huggingface", f"Unsloth import failed: {exc}")
+        return RuntimeChoice("huggingface", f"Unsloth import failed, so falling back to Hugging Face: {exc}")
 
-    model_name = cfg["model"]["name"].lower()
-    if "mistral" in model_name:
-        return RuntimeChoice("unsloth", "Mistral model detected and Unsloth is available.")
+    unsloth_model_name = str(cfg["model"].get("unsloth_model_name") or "").strip()
+    base_model_name = str(cfg["model"].get("name") or "").strip()
 
-    if use_unsloth is True or str(use_unsloth).lower() == "true":
-        return RuntimeChoice("unsloth", "Config explicitly enabled Unsloth.")
+    if unsloth_model_name:
+        return RuntimeChoice("unsloth", f"Using Unsloth-first path with configured Unsloth model '{unsloth_model_name}'.")
 
-    return RuntimeChoice("huggingface", "Model not explicitly covered by current Unsloth auto rule.")
+    return RuntimeChoice("unsloth", f"Using Unsloth-first path with base model '{base_model_name}'. If unsupported at runtime, Hugging Face fallback will be used.")
 
 
 def prepare_tokenizer(tokenizer, cfg: Dict[str, Any]):

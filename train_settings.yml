@@ -54,14 +54,14 @@ model:
   # Switch to flash_attention_2 only after verifying your environment supports it end-to-end.
   attn_implementation: sdpa
 
-  # Whether to prefer Unsloth.
-  # Values: auto | true | false.
-  # Role: if supported, Unsloth uses faster/more memory-efficient loading and training.
-  # Impact: can reduce [memory] and [time].
-  use_unsloth: auto
+  # Whether to use the Unsloth-first orchestration policy.
+  # Values: true | false.
+  # Role: when true, the trainer always attempts Unsloth first and falls back to Hugging Face only if Unsloth is unavailable or unsupported.
+  # Impact: can reduce [memory] and [time] when supported.
+  use_unsloth: true
 
-  # Unsloth-optimized model identifier.
-  # Role: used only when the Unsloth path is selected.
+  # Unsloth-optimized model identifier used for the primary training path.
+  # Role: this is the first model the orchestration tries to load in Unsloth mode.
   # Impact: no direct [batch] effect, but optimized checkpoints may reduce [memory] and [time].
   unsloth_model_name: unsloth/mistral-7b-bnb-4bit
 
