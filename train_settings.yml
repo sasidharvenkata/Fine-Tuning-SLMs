@@ -1,0 +1,491 @@
+# ============================================================================
+# Training configuration for supervised fine-tuning (SFT)
+# Base model : mistralai/Mistral-7B-v0.1
+# Dataset    : yahma/alpaca-cleaned
+# ============================================================================
+# This file centralizes all training knobs so you can change behavior without
+# editing Python code.
+#
+# IMPORTANT READING GUIDE
+# -----------------------
+# Each parameter below includes a comment explaining:
+# - what it does,
+# - when to change it,
+# - whether it impacts TRAINING DURATION, MEMORY CONSUMPTION, or EFFECTIVE BATCH SIZE.
+#
+# Legend used in comments:
+#   [time]   = directly affects wall-clock training duration
+#   [memory] = directly affects GPU / CPU RAM consumption
+#   [batch]  = affects micro-batch or effective batch size
+#
+# Effective batch size formula:
+#   effective_batch_size = per_device_train_batch_size * gradient_accumulation_steps * num_gpus
+# For single-GPU RunPod training, num_gpus = 1.
+# ============================================================================
+
+model:
+  # Hugging Face base model to fine-tune.
+  # Role: selects architecture, parameter count, tokenizer family, and base weights.
+  # Impact: larger models usually increase [memory] and [time].
+  name: mistralai/Mistral-7B-v0.1
+
+  # Whether to trust custom model code from the model repository.
+  # Role: needed only for repositories with custom modeling/tokenizer code.
+  # Impact: no meaningful effect on [time], [memory], or [batch].
+  trust_remote_code: false
+
+  # Optional model revision, tag, or commit hash for reproducibility.
+  # Role: pins an exact snapshot of model files.
+  # Impact: no meaningful effect on [time], [memory], or [batch].
+  revision: null
+
+  # Numeric precision used when loading model weights if not delegated to auto.
+  # Values: auto | float16 | bfloat16 | float32.
+  # Role: controls compute precision and some memory behavior.
+  # Impact: float32 greatly increases [memory] and often [time]; float16/bfloat16 are better for A40.
+  dtype: auto
+
+  # Attention backend used by Transformers fallback.
+  # Values: eager | sdpa | flash_attention_2.
+  # Role: affects attention kernel implementation.
+  # Impact: can noticeably affect both [time] and [memory]. flash_attention_2 is usually fastest if installed.
+  attn_implementation: sdpa
+
+  # Whether to prefer Unsloth.
+  # Values: auto | true | false.
+  # Role: if supported, Unsloth uses faster/more memory-efficient loading and training.
+  # Impact: can reduce [memory] and [time].
+  use_unsloth: auto
+
+  # Unsloth-optimized model identifier.
+  # Role: used only when the Unsloth path is selected.
+  # Impact: no direct [batch] effect, but optimized checkpoints may reduce [memory] and [time].
+  unsloth_model_name: unsloth/mistral-7b-bnb-4bit
+
+  # Load the base model in 4-bit quantized form.
+  # Role: major memory-saving knob for QLoRA-style training.
+  # Impact: strongly reduces [memory], may slightly affect [time], and often enables higher [batch].
+  load_in_4bit: true
+
+  # Load model in 8-bit quantized form.
+  # Role: an alternative to 4-bit loading; usually disabled when 4-bit is enabled.
+  # Impact: uses more [memory] than 4-bit, less than full precision; may influence [time] and [batch].
+  load_in_8bit: false
+
+  # Device placement strategy for the Hugging Face fallback path.
+  # Values like auto, cuda:0, etc.
+  # Role: determines how model layers are placed across devices.
+  # Impact: may affect [memory] placement and, in multi-device setups, [time].
+  device_map: auto
+
+  # Maximum sequence length in tokens seen by the model during training.
+  # Role: upper bound for prompt + response tokenized length.
+  # Impact: one of the biggest knobs for [memory] and [time]; longer sequences increase attention cost heavily.
+  # Rule of thumb: attention cost grows roughly with sequence length, and VRAM usage rises sharply.
+  max_sequence_length: 4096
+
+# Dataset settings.
+dataset:
+  # Dataset name on Hugging Face Hub.
+  # Role: source of training samples.
+  # Impact: dataset content affects convergence and total number of steps; larger datasets usually increase [time].
+  name: yahma/alpaca-cleaned
+
+  # Split to load from the dataset.
+  # Role: selects the source split before custom train/validation split.
+  # Impact: indirect [time] effect if the split size changes.
+  split: train
+
+  # Column names used by the formatter.
+  # Role: maps dataset fields into the training prompt template.
+  # Impact: no direct [time], [memory], or [batch] effect.
+  input_field: input
+  instruction_field: instruction
+  output_field: output
+
+  # Name of the final rendered text field created by preprocessing.
+  # Role: this is the text column consumed by SFTTrainer.
+  # Impact: no direct [time], [memory], or [batch] effect.
+  text_field: text
+
+  # Fraction of the original split reserved for validation.
+  # Role: creates an eval set via train_test_split.
+  # Impact: increases [time] when evaluation runs; no direct [memory] impact during training steps.
+  val_size: 0.01
+
+  # Random seed for shuffling and splitting.
+  # Role: reproducibility.
+  # Impact: no direct [time], [memory], or [batch] effect.
+  seed: 3407
+
+  # Number of CPU worker processes used during dataset.map preprocessing.
+  # Role: parallelizes prompt formatting/tokenization-style preprocessing work.
+  # Impact: can reduce preprocessing [time] but increase CPU RAM usage; no GPU [batch] effect.
+  num_proc: 4
+
+  # Whether to shuffle the dataset before splitting/training.
+  # Role: improves sample ordering randomness.
+  # Impact: negligible effect on [time], [memory], or [batch].
+  shuffle: true
+
+# Prompt formatting.
+prompt:
+  # Whether to append EOS token text to every formatted sample.
+  # Role: helps the model learn where outputs end.
+  # Impact: tiny increase in token count, so negligible [time]/[memory] impact.
+  add_eos_token: true
+
+  # Prompt template used to render instruction/input/output examples.
+  # Role: defines the supervised format the model learns.
+  # Impact: longer templates increase token count, which increases both [time] and [memory].
+  template: |
+    Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.
+
+    ### Instruction:
+    {instruction}
+
+    ### Input:
+    {input}
+
+    ### Response:
+    {output}
+
+training:
+  # Root directory for checkpoints and intermediate training artifacts.
+  # Role: stores checkpoints, adapter weights, logs, and trainer outputs.
+  # Impact: no direct [memory] effect on GPU; checkpointing frequency influences I/O and total [time].
+  output_dir: ./artifacts/mistral7b-alpaca-cleaned
+
+  # Directory for TensorBoard-style logs generated by the trainer.
+  # Role: logging destination.
+  # Impact: no direct GPU [memory]; tiny I/O impact on [time].
+  logging_dir: ./artifacts/mistral7b-alpaca-cleaned/logs
+
+  # Whether to overwrite an existing output directory.
+  # Role: protects old runs unless intentionally replaced.
+  # Impact: no direct [time], [memory], or [batch] effect.
+  overwrite_output_dir: false
+
+  # Checkpoint save policy.
+  # Values: steps | epoch | no.
+  # Role: how often model checkpoints are persisted.
+  # Impact: more frequent saves increase [time] due to disk I/O.
+  save_strategy: steps
+
+  # Save checkpoint every N optimizer update steps.
+  # Role: checkpoint cadence when save_strategy=steps.
+  # Impact: smaller values increase I/O overhead and total [time].
+  save_steps: 100
+
+  # Max number of checkpoints to keep.
+  # Role: limits disk usage.
+  # Impact: no direct training [memory] or [batch] effect.
+  save_total_limit: 3
+
+  # Evaluation scheduling strategy.
+  # Values: steps | epoch | no.
+  # Role: determines when validation is run.
+  # Impact: frequent evaluation increases total [time] and some temporary [memory].
+  evaluation_strategy: steps
+
+  # Run evaluation every N update steps if evaluation_strategy=steps.
+  # Role: eval cadence.
+  # Impact: lower values increase [time].
+  eval_steps: 100
+
+  # Log metrics every N update steps.
+  # Role: controls console/W&B/TensorBoard logging cadence.
+  # Impact: smaller values slightly increase [time], especially with external trackers.
+  logging_steps: 10
+
+  # Number of full passes over the training dataset.
+  # Role: top-level control over total optimization work.
+  # Impact: one of the main [time] drivers; more epochs = longer training.
+  num_train_epochs: 1
+
+  # Hard cap on total optimizer steps.
+  # Role: if > 0, this overrides epoch-derived step count.
+  # Impact: strong [time] control knob. Higher values = longer training.
+  max_steps: -1
+
+  # Micro-batch size per forward/backward pass on each device.
+  # Role: number of samples processed simultaneously on the GPU before accumulation.
+  # Impact: major [memory] and [batch] knob; larger values increase VRAM usage and can improve throughput until OOM.
+  per_device_train_batch_size: 2
+
+  # Eval micro-batch size on each device.
+  # Role: number of validation samples processed simultaneously.
+  # Impact: affects eval [memory] and eval [time].
+  per_device_eval_batch_size: 2
+
+  # Number of gradient accumulation steps before optimizer update.
+  # Role: simulates a larger effective batch without increasing micro-batch as much.
+  # Impact: increases effective [batch] and usually increases [time] per optimizer step, while reducing peak [memory] compared to raising micro-batch directly.
+  gradient_accumulation_steps: 8
+
+  # Learning rate for the optimizer.
+  # Role: update step size.
+  # Impact: no direct [memory] effect; indirect [time] impact because unstable LR may require more tuning/reruns.
+  learning_rate: 0.0002
+
+  # Weight decay regularization strength.
+  # Role: discourages overly large weights.
+  # Impact: negligible direct [time]/[memory]/[batch] effect.
+  weight_decay: 0.01
+
+  # Fraction of total steps used for learning-rate warmup.
+  # Role: stabilizes early training.
+  # Impact: no direct [memory] effect; no meaningful total [time] impact beyond scheduler behavior.
+  warmup_ratio: 0.03
+
+  # Learning-rate scheduler type.
+  # Role: determines LR evolution across training.
+  # Impact: no direct [memory] effect; negligible direct [time] impact.
+  lr_scheduler_type: cosine
+
+  # Optimizer implementation.
+  # Examples: adamw_torch, paged_adamw_8bit, adamw_8bit.
+  # Role: affects optimizer state memory and possibly throughput.
+  # Impact: important [memory] and [time] knob. 8-bit optimizers reduce memory and can help fit larger runs.
+  optim: adamw_8bit
+
+  # Gradient clipping threshold.
+  # Role: stabilizes updates by limiting gradient norm.
+  # Impact: negligible direct [time], [memory], or [batch] effect.
+  max_grad_norm: 1.0
+
+  # Enable gradient checkpointing.
+  # Role: trades recomputation for lower activation memory.
+  # Impact: strongly reduces [memory] and increases [time]. One of the best knobs when VRAM is tight.
+  gradient_checkpointing: true
+
+  # Gradient checkpointing mode for Unsloth path.
+  # Values: unsloth | true | false.
+  # Role: lets Unsloth choose its optimized checkpointing behavior.
+  # Impact: same core tradeoff as above: lower [memory], longer [time].
+  gradient_checkpointing_mode: unsloth
+
+  # Whether to pack multiple short examples into one sequence.
+  # Role: improves token utilization when many examples are short.
+  # Impact: often reduces total [time] by wasting less padding, but can change memory patterns slightly.
+  packing: false
+
+  # Group similar-length samples together.
+  # Role: reduces padding waste in batches.
+  # Impact: can improve [time] and effective memory efficiency, especially with variable-length samples.
+  group_by_length: true
+
+  # Whether to use bfloat16 mixed precision.
+  # Values: auto | true | false.
+  # Role: lower-memory/faster precision mode when supported.
+  # Impact: can reduce [memory] and improve [time] relative to float32.
+  bf16: auto
+
+  # Whether to use float16 mixed precision.
+  # Values: auto | true | false.
+  # Role: used when bf16 is unavailable.
+  # Impact: reduces [memory] and often improves [time] versus float32.
+  fp16: auto
+
+  # Enable TensorFloat-32 on supported NVIDIA GPUs for some matrix ops.
+  # Role: allows faster math kernels where applicable.
+  # Impact: may improve [time]; negligible [memory] effect.
+  tf32: true
+
+  # Number of data loader worker processes.
+  # Role: CPU-side batch preparation parallelism.
+  # Impact: can reduce input pipeline [time] bottlenecks but increase CPU RAM usage.
+  dataloader_num_workers: 2
+
+  # Reporting backend.
+  # Values: none | wandb | tensorboard | mlflow.
+  # Role: decides where trainer logs metrics.
+  # Impact: W&B adds slight logging overhead to [time], especially with small logging_steps.
+  report_to: wandb
+
+  # Human-readable run name shown in W&B / trainer logs.
+  # Role: easier experiment tracking.
+  # Impact: no effect on [time], [memory], or [batch].
+  run_name: mistral7b-alpaca-cleaned-a40
+
+  # W&B project name.
+  # Role: groups runs under one project dashboard.
+  # Impact: no direct [time], [memory], or [batch] effect.
+  wandb_project: mistral7b-alpaca
+
+  # W&B entity/team name. Set to null to use your default account.
+  # Role: selects personal workspace or team workspace.
+  # Impact: no direct [time], [memory], or [batch] effect.
+  wandb_entity: null
+
+  # W&B model logging behavior.
+  # Values: false | end | checkpoint | all.
+  # Role: controls whether checkpoints/final models are uploaded to W&B.
+  # Impact: can significantly increase [time] and network usage if checkpoint uploads are enabled.
+  wandb_log_model: false
+
+  # W&B mode.
+  # Values: online | offline | disabled.
+  # Role: choose online syncing or offline local logging.
+  # Impact: online mode adds some overhead; offline reduces network-related [time] effects.
+  wandb_mode: online
+
+  # Random seed for trainer-level reproducibility.
+  # Role: controls shuffling and initialization choices where applicable.
+  # Impact: no direct [time], [memory], or [batch] effect.
+  seed: 3407
+
+  # DDP setting for multi-GPU environments.
+  # Role: avoids checking unused parameters in distributed runs.
+  # Impact: mostly relevant to multi-GPU [time]/stability; no single-GPU effect.
+  ddp_find_unused_parameters: false
+
+  # Whether unused dataset columns should be automatically removed.
+  # Role: keeps extra fields around if custom collators or formatting need them.
+  # Impact: minor host [memory] effect; negligible training effect.
+  remove_unused_columns: false
+
+  # Name of the text field consumed by SFTTrainer.
+  # Role: points trainer to rendered prompt text.
+  # Impact: no direct [time], [memory], or [batch] effect.
+  dataset_text_field: text
+
+  # Whether to compute loss only on assistant tokens.
+  # Role: used in chat-template-aware trainers for selective loss masking.
+  # Impact: small indirect [time] effect; usually false for simple Alpaca-style full-target SFT.
+  assistant_only_loss: false
+
+# LoRA / PEFT settings.
+lora:
+  # Whether to enable LoRA adapters instead of full fine-tuning.
+  # Role: trains low-rank adapter weights on top of the frozen base model.
+  # Impact: dramatically reduces [memory] and [time] compared with full fine-tuning.
+  enabled: true
+
+  # LoRA rank.
+  # Role: adapter capacity. Higher rank means more trainable parameters.
+  # Impact: higher values increase [memory] and [time]; may improve adaptation quality.
+  r: 16
+
+  # LoRA alpha scaling.
+  # Role: scales the adapter update contribution.
+  # Impact: negligible direct [memory]/[time] effect compared with rank.
+  alpha: 32
+
+  # LoRA dropout probability.
+  # Role: regularization inside adapter layers.
+  # Impact: negligible direct [memory] effect; tiny [time] effect at most.
+  dropout: 0.05
+
+  # Bias training mode.
+  # Values: none | all | lora_only.
+  # Role: whether biases are trainable in addition to LoRA params.
+  # Impact: enabling more bias params slightly increases [memory] and [time].
+  bias: none
+
+  # PEFT task type.
+  # Role: tells PEFT what model class/task is being adapted.
+  # Impact: no direct [time], [memory], or [batch] effect.
+  task_type: CAUSAL_LM
+
+  # List of target modules where LoRA adapters are inserted.
+  # Role: controls which projections are adapted.
+  # Impact: more target modules increase trainable parameter count, so they increase [memory] and [time].
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+# Saving settings.
+save:
+  # Save only adapter weights (true) or broader model artifacts via trainer save.
+  # Role: adapter-only saving is smaller and faster.
+  # Impact: affects save-time [time] and disk usage, not training [memory]/[batch].
+  save_adapter_only: true
+
+  # Whether to save a merged full model after training.
+  # Role: merges LoRA adapter into base model for standalone inference.
+  # Impact: increases post-training [time], CPU/GPU memory during merge, and disk usage.
+  merged_model: false
+
+  # Precision used for merged model save.
+  # Role: controls merged checkpoint size and numeric format.
+  # Impact: lower precision can reduce disk size and save-time resource usage.
+  merged_dtype: float16
+
+  # Final destination for saved adapter/tokenizer artifacts.
+  # Role: primary output directory for the trained result.
+  # Impact: no direct [memory]/[batch] effect.
+  final_model_dir: ./artifacts/mistral7b-alpaca-cleaned/final
+
+  # Destination for optional merged full-weights model.
+  # Role: used only if merged_model=true.
+  # Impact: no direct [memory]/[batch] effect during training.
+  merged_model_dir: ./artifacts/mistral7b-alpaca-cleaned/final-merged
+
+  # Save tokenizer files alongside the model.
+  # Role: required for portable inference.
+  # Impact: negligible [time] only.
+  save_tokenizer: true
+
+  # Save trainer state such as optimizer/scheduler states.
+  # Role: enables resume and reproducibility.
+  # Impact: some checkpointing [time] and disk usage overhead.
+  save_training_state: true
+
+# Optional inference smoke test performed after training.
+inference:
+  # Whether to run a quick generation test after training completes.
+  # Role: verifies that the saved model can generate text.
+  # Impact: small post-training [time] and inference [memory] usage only.
+  run_after_train: true
+
+  # Maximum number of new tokens generated in the smoke test.
+  # Role: caps response length during validation generation.
+  # Impact: larger values increase post-training [time] and inference memory usage.
+  max_new_tokens: 128
+
+  # Sampling temperature.
+  # Role: controls randomness in generation.
+  # Impact: no meaningful [time], [memory], or [batch] training effect.
+  temperature: 0.7
+
+  # Top-p nucleus sampling threshold.
+  # Role: limits sampling to a cumulative probability mass.
+  # Impact: no meaningful training [time], [memory], or [batch] effect.
+  top_p: 0.9
+
+  # Whether to sample or do deterministic decoding.
+  # Role: affects generation style in the smoke test.
+  # Impact: no meaningful training [time], [memory], or [batch] effect.
+  do_sample: true
+
+  # Prompt used for the smoke test.
+  # Role: simple sanity check input.
+  # Impact: tiny post-training [time]/memory effect only.
+  prompt: |
+    ### Instruction:
+    Explain in simple terms what LoRA fine-tuning is.
+
+    ### Response:
+
+# Environment / reproducibility helpers.
+runtime:
+  # Hugging Face cache root.
+  # Role: stores downloaded models/datasets.
+  # Impact: disk/cache behavior only.
+  hf_home: ./hf_cache
+
+  # Transformers cache directory.
+  # Role: cache location for model files.
+  # Impact: disk/cache behavior only.
+  transformers_cache: ./hf_cache
+
+  # Global runtime seed.
+  # Role: reproducibility helper.
+  # Impact: no direct [time], [memory], or [batch] effect.
+  seed: 3407
