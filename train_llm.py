@@ -46,7 +46,6 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     BitsAndBytesConfig,
-    DataCollatorForLanguageModeling,
     TrainingArguments,
     set_seed,
 )
@@ -146,6 +145,8 @@ def configure_wandb(cfg: Dict[str, Any]) -> None:
         return
 
     os.environ.setdefault("WANDB_PROJECT", str(tcfg.get("wandb_project", "llm-finetune")))
+    if tcfg.get("wandb_api_key") not in (None, "", "null"):
+        os.environ["WANDB_API_KEY"] = str(tcfg.get("wandb_api_key"))
     if tcfg.get("wandb_entity") not in (None, "", "null"):
         os.environ.setdefault("WANDB_ENTITY", str(tcfg.get("wandb_entity")))
     if tcfg.get("run_name"):
@@ -212,19 +213,16 @@ def resolve_dtype(model_cfg: Dict[str, Any]) -> torch.dtype | None:
 
 
 def build_prompt(example: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, str]:
-    """Format a raw Alpaca sample into a single training text string.
+    """Format a raw Alpaca sample into prompt/completion fields for completion-only SFT.
 
-    Parameters
-    ----------
-    example:
-        A single dataset row.
-    cfg:
-        Full configuration dictionary.
+    This function intentionally separates the prompt from the completion so the
+    trainer can compute loss only on the response tokens. This is the preferred
+    pattern for prompt-completion datasets in modern TRL workflows.
 
     Returns
     -------
     dict
-        A single-field mapping ``{"text": formatted_text}``.
+        A mapping with ``prompt``, ``completion``, and rendered ``text`` fields.
     """
     dcfg = cfg["dataset"]
     pcfg = cfg["prompt"]
@@ -232,16 +230,22 @@ def build_prompt(example: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, str]
     input_text = (example.get(dcfg["input_field"], "") or "").strip()
     output_text = (example.get(dcfg["output_field"], "") or "").strip()
 
-    rendered = pcfg["template"].format(
+    prompt_text = pcfg["prompt_template"].format(
         instruction=instruction,
         input=input_text if input_text else "",
-        output=output_text,
     )
+    completion_text = pcfg["response_prefix"] + output_text
 
     if pcfg.get("add_eos_token", True):
-        rendered = rendered.rstrip() + "</s>"
+        completion_text = completion_text.rstrip() + "</s>"
 
-    return {dcfg.get("text_field", "text"): rendered}
+    full_text = prompt_text + completion_text
+
+    return {
+        "prompt": prompt_text,
+        "completion": completion_text,
+        dcfg.get("text_field", "text"): full_text,
+    }
 
 
 def load_and_prepare_dataset(cfg: Dict[str, Any]):
@@ -316,7 +320,6 @@ def train_with_unsloth(cfg: Dict[str, Any], dataset) -> Tuple[Any, Any, Any, str
     tuple
         ``(model, tokenizer, trainer, backend_name)``.
     """
-    from peft import PeftModel
     from trl import SFTConfig, SFTTrainer
     from unsloth import FastLanguageModel
 
@@ -386,6 +389,7 @@ def train_with_unsloth(cfg: Dict[str, Any], dataset) -> Tuple[Any, Any, Any, str
         dataset_num_proc=int(cfg["dataset"].get("num_proc", 1)),
         max_length=int(model_cfg["max_sequence_length"]),
         packing=bool(train_cfg.get("packing", False)),
+        completion_only_loss=bool(train_cfg.get("completion_only_loss", True)),
         group_by_length=bool(train_cfg.get("group_by_length", True)),
         dataloader_num_workers=int(train_cfg.get("dataloader_num_workers", 0)),
         remove_unused_columns=bool(train_cfg.get("remove_unused_columns", False)),
@@ -408,7 +412,7 @@ def train_with_unsloth(cfg: Dict[str, Any], dataset) -> Tuple[Any, Any, Any, str
 def train_with_huggingface(cfg: Dict[str, Any], dataset) -> Tuple[Any, Any, Any, str]:
     """Train using Transformers + PEFT + TRL as the fallback backend."""
     from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-    from trl import SFTTrainer
+    from trl import SFTConfig, SFTTrainer
 
     model_cfg = cfg["model"]
     train_cfg = cfg["training"]
@@ -462,7 +466,7 @@ def train_with_huggingface(cfg: Dict[str, Any], dataset) -> Tuple[Any, Any, Any,
         )
         model = get_peft_model(model, peft_config)
 
-    training_args = TrainingArguments(
+    sft_args = SFTConfig(
         output_dir=train_cfg["output_dir"],
         overwrite_output_dir=bool(train_cfg.get("overwrite_output_dir", False)),
         num_train_epochs=float(train_cfg["num_train_epochs"]),
@@ -479,31 +483,30 @@ def train_with_huggingface(cfg: Dict[str, Any], dataset) -> Tuple[Any, Any, Any,
         save_strategy=str(train_cfg["save_strategy"]),
         save_steps=int(train_cfg["save_steps"]),
         save_total_limit=int(train_cfg["save_total_limit"]),
-        evaluation_strategy=str(train_cfg["evaluation_strategy"]),
+        eval_strategy=str(train_cfg["evaluation_strategy"]),
         eval_steps=int(train_cfg["eval_steps"]),
         max_grad_norm=float(train_cfg["max_grad_norm"]),
         fp16=fp16,
         bf16=bf16,
         logging_dir=train_cfg["logging_dir"],
-        report_to=[] if str(train_cfg.get("report_to", "none")) == "none" else [train_cfg.get("report_to")],
+        report_to=None if str(train_cfg.get("report_to", "none")) == "none" else train_cfg.get("report_to"),
         run_name=train_cfg.get("run_name"),
         seed=int(train_cfg.get("seed", 3407)),
         group_by_length=bool(train_cfg.get("group_by_length", True)),
         dataloader_num_workers=int(train_cfg.get("dataloader_num_workers", 0)),
         remove_unused_columns=bool(train_cfg.get("remove_unused_columns", False)),
         ddp_find_unused_parameters=bool(train_cfg.get("ddp_find_unused_parameters", False)),
+        max_length=int(model_cfg["max_sequence_length"]),
+        packing=bool(train_cfg.get("packing", False)),
+        completion_only_loss=bool(train_cfg.get("completion_only_loss", True)),
     )
 
     trainer = SFTTrainer(
         model=model,
         tokenizer=tokenizer,
-        args=training_args,
+        args=sft_args,
         train_dataset=dataset["train"],
         eval_dataset=dataset.get("test"),
-        dataset_text_field=cfg["dataset"].get("text_field", "text"),
-        max_seq_length=int(model_cfg["max_sequence_length"]),
-        packing=bool(train_cfg.get("packing", False)),
-        data_collator=DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False),
     )
 
     trainer.train()
@@ -517,10 +520,13 @@ def save_outputs(model, tokenizer, trainer, cfg: Dict[str, Any], backend_name: s
     final_dir.mkdir(parents=True, exist_ok=True)
 
     LOGGER.info("Saving final model artifacts to %s", final_dir)
+    print(f"[SAVE-INFO] Saving trainer model artifacts to: {final_dir}")
     trainer.save_model(str(final_dir))
     if save_cfg.get("save_tokenizer", True):
+        print(f"[SAVE-INFO] Saving tokenizer to: {final_dir}")
         tokenizer.save_pretrained(str(final_dir))
     if save_cfg.get("save_training_state", True):
+        print("[SAVE-INFO] Saving trainer state")
         trainer.save_state()
 
     metadata = {
@@ -531,6 +537,7 @@ def save_outputs(model, tokenizer, trainer, cfg: Dict[str, Any], backend_name: s
         "output_dir": str(final_dir),
     }
     with open(final_dir / "training_metadata.json", "w", encoding="utf-8") as f:
+        print(f"[SAVE-INFO] Writing training metadata to: {final_dir / 'training_metadata.json'}")
         json.dump(metadata, f, indent=2)
 
     if save_cfg.get("merged_model", False):
@@ -539,6 +546,7 @@ def save_outputs(model, tokenizer, trainer, cfg: Dict[str, Any], backend_name: s
         LOGGER.info("Attempting to save merged model to %s", merged_dir)
         try:
             if hasattr(model, "save_pretrained_merged"):
+                print(f"[SAVE-INFO] Saving merged model to: {merged_dir}")
                 model.save_pretrained_merged(
                     str(merged_dir),
                     tokenizer,
@@ -546,7 +554,9 @@ def save_outputs(model, tokenizer, trainer, cfg: Dict[str, Any], backend_name: s
                 )
             else:
                 merged_model = model.merge_and_unload() if hasattr(model, "merge_and_unload") else model
+                print(f"[SAVE-INFO] Saving merged model to: {merged_dir}")
                 merged_model.save_pretrained(str(merged_dir))
+                print(f"[SAVE-INFO] Saving tokenizer to: {merged_dir}")
                 tokenizer.save_pretrained(str(merged_dir))
         except Exception as exc:
             LOGGER.warning("Merged model save skipped due to error: %s", exc)

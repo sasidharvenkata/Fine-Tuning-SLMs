@@ -48,7 +48,10 @@ model:
   # Attention backend used by Transformers fallback.
   # Values: eager | sdpa | flash_attention_2.
   # Role: affects attention kernel implementation.
-  # Impact: can noticeably affect both [time] and [memory]. flash_attention_2 is usually fastest if installed.
+  # Impact: can noticeably affect both [time] and [memory].
+  # Why sdpa by default: it is the safer default across environments and avoids common compatibility issues when
+  # FlashAttention-2 is not installed or when a given model/library combination does not accept the argument cleanly.
+  # Switch to flash_attention_2 only after verifying your environment supports it end-to-end.
   attn_implementation: sdpa
 
   # Whether to prefer Unsloth.
@@ -138,7 +141,10 @@ prompt:
   # Prompt template used to render instruction/input/output examples.
   # Role: defines the supervised format the model learns.
   # Impact: longer templates increase token count, which increases both [time] and [memory].
-  template: |
+  # Template for the prompt portion only.
+  # Role: builds the context shown to the model before the ground-truth answer.
+  # Impact: longer prompts increase token count, which increases [time] and [memory].
+  prompt_template: |
     Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.
 
     ### Instruction:
@@ -147,8 +153,12 @@ prompt:
     ### Input:
     {input}
 
+  # Prefix inserted immediately before the gold response.
+  # Role: defines where the completion begins. With completion-only loss enabled, loss is applied only from here onward.
+  # Impact: no major [memory]/[batch] effect beyond a few extra tokens.
+  response_prefix: |
+
     ### Response:
-    {output}
 
 training:
   # Root directory for checkpoints and intermediate training artifacts.
@@ -318,6 +328,11 @@ training:
   # Impact: no direct [time], [memory], or [batch] effect.
   wandb_entity: null
 
+  # W&B API key used for authentication on remote machines.
+  # Role: exported to WANDB_API_KEY so metrics are sent to the intended account.
+  # Impact: no direct training [memory]/[batch] effect; keep this secret and do not commit publicly.
+  wandb_api_key: "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"
+
   # W&B model logging behavior.
   # Values: false | end | checkpoint | all.
   # Role: controls whether checkpoints/final models are uploaded to W&B.
@@ -350,9 +365,14 @@ training:
   # Impact: no direct [time], [memory], or [batch] effect.
   dataset_text_field: text
 
-  # Whether to compute loss only on assistant tokens.
-  # Role: used in chat-template-aware trainers for selective loss masking.
-  # Impact: small indirect [time] effect; usually false for simple Alpaca-style full-target SFT.
+  # Whether to compute loss only on completion/response tokens for prompt-completion data.
+  # Role: when true, prompt tokens are masked out and only response tokens contribute to loss.
+  # Impact: does not reduce forward-pass [memory] much because the full sequence is still processed, but it changes what the model is optimized on.
+  completion_only_loss: true
+
+  # Whether to compute loss only on assistant tokens in chat-template-aware conversational training.
+  # Role: mainly for structured chat datasets with templates that expose assistant spans. Not used in this Alpaca prompt-completion setup.
+  # Impact: no direct [batch] effect.
   assistant_only_loss: false
 
 # LoRA / PEFT settings.
@@ -415,6 +435,8 @@ save:
   # Precision used for merged model save.
   # Role: controls merged checkpoint size and numeric format.
   # Impact: lower precision can reduce disk size and save-time resource usage.
+  # Note: fp8 is generally not a standard portable save format for merged Hugging Face checkpoints in this workflow,
+  # so float16 remains the safer default for compatibility.
   merged_dtype: float16
 
   # Final destination for saved adapter/tokenizer artifacts.
@@ -452,7 +474,7 @@ inference:
   # Sampling temperature.
   # Role: controls randomness in generation.
   # Impact: no meaningful [time], [memory], or [batch] training effect.
-  temperature: 0.7
+  temperature: 0.01
 
   # Top-p nucleus sampling threshold.
   # Role: limits sampling to a cumulative probability mass.
@@ -489,3 +511,113 @@ runtime:
   # Role: reproducibility helper.
   # Impact: no direct [time], [memory], or [batch] effect.
   seed: 3407
+
+
+merge:
+  # Adapter directory produced by training.
+  # Role: input path for adapter-to-base merge.
+  # Impact: no direct training [time]/[memory]/[batch] effect.
+  adapter_dir: ./artifacts/mistral7b-alpaca-cleaned/final
+
+  # Output directory for merged full model weights.
+  # Role: destination for standalone merged checkpoint.
+  # Impact: affects post-training disk usage and merge-time resource usage only.
+  output_dir: ./artifacts/mistral7b-alpaca-cleaned/final-merged
+
+  # Precision used while loading/saving during merge.
+  # Role: controls numeric format for the merged model export.
+  # Impact: affects merge-time memory usage and final checkpoint size.
+  dtype: float16
+
+quantization:
+  # Quantization method.
+  # Values: awq | autoround.
+  # Role: selects which post-training quantization algorithm/export flow is used.
+  # Impact: no direct training [batch] effect; affects post-training time, memory use during quantization, and inference compatibility.
+  method: awq
+
+  # Input full model directory to quantize. Usually the merged model output.
+  # Role: source checkpoint for quantization/export.
+  # Impact: no direct training [time]/[memory]/[batch] effect.
+  input_model_dir: ./artifacts/mistral7b-alpaca-cleaned/final-merged
+
+  # Destination directory for quantized export.
+  # Role: output path for deployment-ready quantized weights.
+  # Impact: affects post-training disk usage only.
+  output_dir: ./artifacts/mistral7b-alpaca-cleaned/final-quantized
+
+  # Number of bits for weight quantization.
+  # Role: main compression knob for post-training quantization.
+  # Impact: lower bits usually reduce model size and inference memory, but can increase accuracy loss.
+  bits: 4
+
+  # Quantization group size.
+  # Role: granularity of grouped quantization.
+  # Impact: affects quantization quality/performance trade-off, not training batch size.
+  group_size: 128
+
+  # Whether to use zero-point quantization.
+  # Role: AWQ-related quantization option.
+  # Impact: affects export/inference characteristics only.
+  zero_point: true
+
+  # Whether to use symmetric quantization where supported.
+  # Role: mainly used by AutoRound.
+  # Impact: affects quantized model behavior, not training memory.
+  sym: true
+
+  # Quantization backend/kernel version.
+  # Role: backend selection for AWQ kernels. Common values include GEMM.
+  # Impact: affects inference compatibility/performance after export.
+  version: GEMM
+
+  # Trust remote code when loading tokenizer/model for quantization.
+  # Role: needed only for repos with custom code.
+  # Impact: no direct training [time]/[memory]/[batch] effect.
+  trust_remote_code: false
+
+  # Device map used during quantization model loading.
+  # Role: controls where quantization work is executed.
+  # Impact: affects post-training memory placement and quantization speed.
+  device_map: auto
+
+  # Prefer lower CPU RAM usage when loading models, where supported.
+  # Role: loader optimization.
+  # Impact: reduces host memory pressure, may slightly affect runtime.
+  low_cpu_mem_usage: true
+
+  # Calibration dataset identifier or alias.
+  # Role: source of calibration samples for quantization.
+  # Impact: more/better calibration data can improve accuracy but increases quantization time.
+  calib_data: pileval
+
+  # Maximum number of calibration samples.
+  # Role: quantization calibration budget.
+  # Impact: one of the strongest quantization-time knobs; higher values increase post-training time and memory requirements.
+  max_calib_samples: 128
+
+  # Maximum calibration sequence length.
+  # Role: token length per calibration sample.
+  # Impact: higher values increase quantization time and memory use.
+  max_calib_seq_len: 512
+
+  # AutoRound optimization iterations.
+  # Role: number of tuning iterations for rounding/clipping optimization.
+  # Impact: higher values increase quantization time and may improve quantized accuracy.
+  autoround_iters: 200
+
+  # AutoRound calibration batch size.
+  # Role: batch size during AutoRound calibration/optimization.
+  # Impact: affects quantization memory and throughput, not training batch size.
+  autoround_batch_size: 8
+
+  # Whether AutoRound should reduce GPU memory usage at the cost of speed.
+  # Role: memory-vs-speed knob for AutoRound.
+  # Impact: lower quantization memory, longer quantization time.
+  low_gpu_mem_usage: false
+
+  # Export format used by AutoRound.
+  # Values: auto_round | auto_awq | auto_gptq.
+  # Role: controls the artifact format saved by AutoRound.
+  # Impact: affects downstream loader compatibility rather than training.
+  autoround_export_format: auto_round
