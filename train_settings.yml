@@ -43,7 +43,7 @@ model:
   # Values: auto | float16 | bfloat16 | float32.
   # Role: controls compute precision and some memory behavior.
   # Impact: float32 greatly increases [memory] and often [time]; float16/bfloat16 are better for A40.
-  dtype: auto
+  dtype: bf16
 
   # Attention backend used by Transformers fallback.
   # Values: eager | sdpa | flash_attention_2.
