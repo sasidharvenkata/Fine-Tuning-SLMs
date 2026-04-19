@@ -6,21 +6,15 @@
 # - Fine-tuning with Unsloth when supported
 # - Standard Hugging Face training fallback
 # - Inference and serving with vLLM
-#
-# Design goals:
-# - Be explicit and beginner-friendly in prompts
-# - Avoid hard-failing if Unsloth cannot be installed on the current machine
-# - Keep versions pinned to a compatible and reproducible stack
-# - Work well in remote environments such as RunPod
+# - Optional FlashAttention-2 support for Transformers fallback runs
 #
 # Notes on version strategy:
-# - Unsloth documentation states that `pip install unsloth` pulls compatible core
-#   dependencies automatically, so this script installs the core stack first and
-#   then tries Unsloth separately.[web:38]
-# - vLLM is installed in the same environment because RunPod and vLLM docs present
-#   pip-based installation as the standard path for model serving.[web:40][web:43]
-# - Mistral-family support exists in vLLM's supported model list, which makes it
-#   appropriate for serving a fine-tuned Mistral checkpoint.[web:42][web:45]
+# - W&B uses WANDB_API_KEY for authentication in remote environments.[web:95]
+# - Hugging Face exposes flash_attention_2 through attn_implementation when the
+#   flash-attn package is installed and compatible.[web:203][web:209]
+# - flash-attn commonly installs via pip and often needs to be installed after
+#   torch is already present; upstream guidance and issue threads repeatedly show
+#   separate installation steps such as `pip install flash-attn --no-build-isolation`.[web:198][web:200][web:202][web:204]
 
 set -euo pipefail
 
@@ -117,10 +111,9 @@ activate_env() {
 
 choose_environment() {
   local pybin="$1"
-  local mode env_name env_path base_dir
+  local env_name env_path base_dir
 
   if prompt_yes_no "Do you want to create a new virtual environment?" "y"; then
-    mode="new"
     env_name=$(prompt_non_empty "Enter the new environment name" "$DEFAULT_ENV_NAME")
     base_dir=$(prompt_non_empty "Enter the base directory for virtual environments" "$DEFAULT_BASE_DIR")
     mkdir -p "$base_dir"
@@ -138,7 +131,6 @@ choose_environment() {
       "$pybin" -m venv "$env_path"
     fi
   else
-    mode="existing"
     env_name=$(prompt_non_empty "Enter the existing environment name")
     if prompt_yes_no "Is the environment stored under the default base directory '$DEFAULT_BASE_DIR'?" "y"; then
       env_path="$DEFAULT_BASE_DIR/$env_name"
@@ -173,7 +165,9 @@ install_core_stack() {
     "huggingface_hub>=0.24,<1" \
     "pyyaml>=6,<7" \
     "scipy>=1.11,<2" \
-    "einops>=0.7,<1"
+    "einops>=0.7,<1" \
+    "ninja>=1.11,<2" \
+    "packaging>=24,<26"
 }
 
 install_optional_training_tools() {
@@ -205,6 +199,40 @@ install_vllm() {
     echo "[INFO] vLLM installed successfully"
   else
     echo "[INFO] Skipping vLLM installation"
+  fi
+}
+
+install_flash_attention() {
+  if prompt_yes_no "Will you use attn_implementation=flash_attention_2 for the Hugging Face fallback path?" "y"; then
+    echo "[INFO] Installing flash-attn for FlashAttention-2 support"
+    echo "[INFO] This is usually optional if Unsloth is your primary backend, but useful for the HF fallback path."
+    if python - <<'PY'
+import torch
+print(torch.__version__)
+print(torch.version.cuda)
+PY
+    then
+      :
+    fi
+
+    if pip install "flash-attn" --no-build-isolation; then
+      echo "[INFO] flash-attn installed successfully"
+    else
+      echo "[WARN] flash-attn installation failed. Your HF fallback may need sdpa instead of flash_attention_2."
+    fi
+  else
+    echo "[INFO] Skipping flash-attn installation"
+  fi
+}
+
+install_quantization_tools() {
+  if prompt_yes_no "Install quantization toolchains (AutoAWQ and AutoRound)?" "y"; then
+    echo "[INFO] Installing quantization packages"
+    pip install "autoawq" || true
+    pip install "auto-round" || true
+    echo "[INFO] Quantization package installation attempted"
+  else
+    echo "[INFO] Skipping quantization tools"
   fi
 }
 
@@ -242,7 +270,7 @@ for name in packages:
         print(f"{name}=={version}")
     except Exception as exc:
         print(f"{name} not importable: {exc}")
-for extra in ["unsloth", "vllm", "wandb", "tensorboard"]:
+for extra in ["unsloth", "vllm", "wandb", "tensorboard", "flash_attn", "awq", "auto_round"]:
     try:
         mod = importlib.import_module(extra)
         version = getattr(mod, "__version__", "unknown")
@@ -252,7 +280,7 @@ for extra in ["unsloth", "vllm", "wandb", "tensorboard"]:
 PY
   } | tee "$info_file"
 
-  echo "[INFO] Wrote installation summary to $info_file"
+  echo "[SAVE-INFO] Wrote installation summary to $info_file"
 }
 
 main() {
@@ -270,6 +298,8 @@ main() {
   install_optional_training_tools
   install_unsloth
   install_vllm
+  install_flash_attention
+  install_quantization_tools
   write_env_info "$env_path"
 
   echo
